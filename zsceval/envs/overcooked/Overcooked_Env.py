@@ -728,7 +728,7 @@ class Overcooked(gym.Env):
                 shaped_reward_p1 = sparse_reward + self.reward_shaping_factor * dense_reward[1]
         # TODO: log returned reward
         if self.store_traj:
-            self.traj_to_store.append(info["shaped_info_by_agnet"])
+            self.traj_to_store.append(info["shaped_info_by_agent"])
             self.traj_to_store.append(self.base_env.state.to_dict())
 
         reward = [[shaped_reward_p0], [shaped_reward_p1]]
@@ -1002,8 +1002,7 @@ class Overcooked(gym.Env):
         return grid_string
 
     def _store_trajectory(self):
-        if not os.path.exists(f"{self.run_dir}/trajs/{self.layout_name}/"):
-            os.makedirs(f"{self.run_dir}/trajs/{self.layout_name}/")
+        os.makedirs(f"{self.run_dir}/trajs/{self.layout_name}/", exist_ok=True)
         save_dir = f"{self.run_dir}/trajs/{self.layout_name}/traj_{self.rank}_{self.traj_num}.pkl"
         pickle.dump(self.traj_to_store, open(save_dir, "wb"))
 
