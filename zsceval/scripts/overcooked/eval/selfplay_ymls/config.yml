@@ -1,11 +1,11 @@
-cole_self_a:
+self_a:
   policy_config_path: random3/policy_config/rnn_policy_config.pkl
   featurize_type: ppo
   train: False
   model_path:
     actor: random3/cole/s2/cole-S2-s50/1.pt
 
-cole_self_b:
+self_b:
   policy_config_path: random3/policy_config/rnn_policy_config.pkl
   featurize_type: ppo
   train: False
