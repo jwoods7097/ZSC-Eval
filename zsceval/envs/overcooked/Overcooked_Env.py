@@ -1,3 +1,4 @@
+import json
 import os
 import pickle
 import pprint
@@ -494,6 +495,82 @@ class Overcooked(gym.Env):
         else:
             self.script_agent = [None, None]
 
+    def _json_safe(self, obj):
+        if isinstance(obj, dict):
+            return {str(k): self._json_safe(v) for k, v in obj.items()}
+        if isinstance(obj, (list, tuple)):
+            return [self._json_safe(v) for v in obj]
+        if isinstance(obj, np.ndarray):
+            return self._json_safe(obj.tolist())
+        if isinstance(obj, np.integer):
+            return int(obj)
+        if isinstance(obj, np.floating):
+            return float(obj)
+        if isinstance(obj, np.bool_):
+            return bool(obj)
+        return obj
+
+    def _clean_object(self, obj):
+        if obj is None:
+            return None
+
+        obj = self._json_safe(obj)
+
+        # Drop fields that are absent in your reference JSON when empty.
+        if obj.get("state", None) is None:
+            obj.pop("state", None)
+
+        return obj
+
+    def _clean_state(self, state_dict):
+        state_dict = self._json_safe(state_dict)
+
+        clean_players = []
+        for player in state_dict["players"]:
+            clean_player = {
+                "position": player["position"],
+                "orientation": player["orientation"],
+            }
+
+            held = player.get("held_object", None)
+            if held is not None:
+                clean_player["held_object"] = self._clean_object(held)
+
+            clean_players.append(clean_player)
+
+        objects = state_dict.get("objects", {})
+
+        # ZSC-Eval old backend often gives objects as a list.
+        # Your target JSON expects a dict keyed by "x,y".
+        if isinstance(objects, list):
+            clean_objects = {}
+            for obj in objects:
+                obj = self._clean_object(obj)
+                pos = obj["position"]
+                clean_objects[f"{pos[0]},{pos[1]}"] = obj
+        elif isinstance(objects, dict):
+            clean_objects = {
+                str(k): self._clean_object(v)
+                for k, v in objects.items()
+            }
+        else:
+            clean_objects = {}
+
+        return {
+            "players": clean_players,
+            "objects": clean_objects,
+            "order_list": state_dict.get("order_list", None),
+        }
+
+    def _trajectory_mdp_params(self):
+        return {
+            "layout_name": getattr(self, "traj_layout_name", self.layout_name),
+            "num_items_for_soup": 3,
+            "rew_shaping_params": None,
+            "cook_time": 20,
+            "start_order_list": None,
+        }
+
     def reset_featurize_type(self, featurize_type=("ppo", "ppo")):
         assert len(featurize_type) == 2
         self.featurize_type = featurize_type
@@ -669,9 +746,6 @@ class Overcooked(gym.Env):
         if self.stuck_time > 0:
             self.history_sa[-1][1] = joint_action
 
-        if self.store_traj:
-            self.traj_to_store.append(joint_action)
-
         if self.use_phi:
             raise NotImplementedError
             next_state, sparse_reward, done, info = self.base_env.step(joint_action, display_phi=True)
@@ -680,7 +754,19 @@ class Overcooked(gym.Env):
             shaped_reward_p0 = sparse_reward + self.reward_shaping_factor * dense_reward[0]
             shaped_reward_p1 = sparse_reward + self.reward_shaping_factor * dense_reward[1]
         else:
+            if self.store_traj:
+                traj_state_t = self._clean_state(self.base_env.state.to_dict())
+                traj_joint_action = [
+                    int(Action.ACTION_TO_INDEX[a])
+                    for a in joint_action
+                ]
+            
             next_state, sparse_reward, done, info = self.base_env.step(joint_action)
+
+            if self.store_traj:
+                self.traj_to_store["ep_states"][0].append(traj_state_t)
+                self.traj_to_store["ep_actions"][0].append(traj_joint_action)
+                self.traj_to_store["ep_rewards"][0].append(self._json_safe(sparse_reward))
 
             if self.use_hsp:
                 from zsceval.envs.overcooked.overcooked_ai_py.mdp.overcooked_mdp import (
@@ -726,10 +812,6 @@ class Overcooked(gym.Env):
                 dense_reward = info["shaped_r_by_agent"]
                 shaped_reward_p0 = sparse_reward + self.reward_shaping_factor * dense_reward[0]
                 shaped_reward_p1 = sparse_reward + self.reward_shaping_factor * dense_reward[1]
-        # TODO: log returned reward
-        if self.store_traj:
-            self.traj_to_store.append(info["shaped_info_by_agent"])
-            self.traj_to_store.append(self.base_env.state.to_dict())
 
         reward = [[shaped_reward_p0], [shaped_reward_p1]]
 
@@ -855,8 +937,12 @@ class Overcooked(gym.Env):
             # self.fake_render()
 
         if self.store_traj:
-            self.traj_to_store = []
-            self.traj_to_store.append(self.base_env.state.to_dict())
+            self.traj_to_store = {
+                "ep_states": [[]],
+                "ep_actions": [[]],
+                "ep_rewards": [[]],
+                "mdp_params": [self._trajectory_mdp_params()],
+            }
 
         if self.use_hsp:
             self.cumulative_hidden_reward = np.zeros(2)
@@ -1003,8 +1089,9 @@ class Overcooked(gym.Env):
 
     def _store_trajectory(self):
         os.makedirs(f"{self.run_dir}/trajs/{self.layout_name}/", exist_ok=True)
-        save_dir = f"{self.run_dir}/trajs/{self.layout_name}/traj_{self.rank}_{self.traj_num}.pkl"
-        pickle.dump(self.traj_to_store, open(save_dir, "wb"))
+        save_dir = f"{self.run_dir}/trajs/{self.layout_name}/traj_{self.rank}_{self.traj_num}.json"
+        with open(save_dir, "w", encoding="utf-8") as f:
+            json.dump(self.traj_to_store, f, indent=4)
 
     def seed(self, seed):
         setup_seed(seed)
