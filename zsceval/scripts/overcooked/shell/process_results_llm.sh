@@ -1,6 +1,6 @@
 for agent in cole
 do
-    for env in random0
+    for env in random0 random3
     do
         traj_dir="$HOME/ZSC/results/Overcooked/${env}/population/selfplay-${env}-${agent}-seed1/trajs/${env}"
 
@@ -9,6 +9,6 @@ do
             --traj_dir "$traj_dir" \
             --out_csv "eval/selfplay_results/${env}_${agent}_seed1_llm.csv" \
             --out_jsonl "eval/selfplay_results/${env}_${agent}_seed1_llm.jsonl" \
-            --limit 1
+            --limit 10
     done
 done

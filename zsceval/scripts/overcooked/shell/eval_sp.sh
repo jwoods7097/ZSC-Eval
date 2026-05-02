@@ -34,7 +34,7 @@ EOF
       --layout_name $env \
       --num_agents 2 \
       --seed 1 \
-      --episode_length 400 \
+      --episode_length 200 \
       --n_eval_rollout_threads 100 \
       --eval_episodes 100 \
       --eval_stochastic \
