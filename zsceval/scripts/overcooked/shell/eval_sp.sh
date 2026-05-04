@@ -1,6 +1,6 @@
 export POLICY_POOL=../../policy_pool
 
-for agent in cole
+for agent in cole mep hsp fcp
 do
   if [ "$agent" = "cole" ]
   then

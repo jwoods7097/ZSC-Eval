@@ -1,4 +1,4 @@
-for agent in cole
+for agent in cole mep hsp fcp
 do
     for env in random0 random3
     do
@@ -8,7 +8,6 @@ do
         python eval/detect_int_llm.py \
             --traj_dir "$traj_dir" \
             --out_csv "eval/selfplay_results/${env}_${agent}_seed1_llm.csv" \
-            --out_jsonl "eval/selfplay_results/${env}_${agent}_seed1_llm.jsonl" \
-            --limit 10
+            --out_jsonl "eval/selfplay_results/${env}_${agent}_seed1_llm.jsonl"
     done
 done

@@ -579,14 +579,14 @@ def naturalize_interact_held_change(
                 loc, _ = match
                 onion_id = tracker.pickup_onion_from_shared(t, agent_id, loc)
                 lines.append(
-                    f"t={t}: agent {agent_id} interacted and picked up {onion_id} ('onion') "
-                    f"from shared counter/location {loc}."
+                    f"t={t}: agent {agent_id} picked up {onion_id} "
+                    f"from location {loc}."
                 )
             else:
                 onion_id = tracker.pickup_onion_from_source(t, agent_id)
                 lines.append(
-                    f"t={t}: agent {agent_id} interacted and picked up {onion_id} ('onion') "
-                    f"from the onion dispenser/source."
+                    f"t={t}: agent {agent_id} picked up {onion_id} "
+                    f"from an onion dispenser"
                 )
             return lines
 
@@ -597,21 +597,21 @@ def naturalize_interact_held_change(
                 onions = tracker.soup_onions.get(soup_id, [])
                 onions_text = ", ".join(onions) if onions else "unknown onions"
                 lines.append(
-                    f"t={t}: agent {agent_id} interacted and picked up {soup_id} ('soup') "
-                    f"from shared counter/location {loc}; {soup_id} used onions [{onions_text}]."
+                    f"t={t}: agent {agent_id} picked up {soup_id} "
+                    f"from location {loc}; {soup_id} used onions [{onions_text}]."
                 )
             else:
                 soup_id = tracker.fill_soup(t, agent_id, soup_change_location)
                 onions = tracker.soup_onions.get(soup_id, [])
                 onions_text = ", ".join(onions) if onions else "unknown onions"
                 lines.append(
-                    f"t={t}: agent {agent_id} interacted and picked up/filled {soup_id} ('soup'); "
+                    f"t={t}: agent {agent_id} picked up {soup_id}; "
                     f"{soup_id} used onions [{onions_text}]."
                 )
             return lines
 
         lines.append(
-            f"t={t}: agent {agent_id} interacted and picked up {obj_brief(held_after)}."
+            f"t={t}: agent {agent_id} picked up {obj_brief(held_after)}."
         )
         return lines
 
@@ -624,7 +624,7 @@ def naturalize_interact_held_change(
             onions = tracker.soup_onions.get(soup_id, [])
             onions_text = ", ".join(onions) if onions else "unknown onions"
             lines.append(
-                f"t={t}: agent {agent_id} interacted and delivered {soup_id} ('soup'); "
+                f"t={t}: agent {agent_id} delivered {soup_id} and achieved the goal; "
                 f"{soup_id} used onions [{onions_text}]."
             )
             return lines
@@ -635,8 +635,8 @@ def naturalize_interact_held_change(
             if before_name == "onion":
                 onion_id = tracker.place_onion_on_shared(t, agent_id, loc)
                 lines.append(
-                    f"t={t}: agent {agent_id} interacted and placed {onion_id} ('onion') "
-                    f"on shared counter/location {loc}."
+                    f"t={t}: agent {agent_id} placed {onion_id} "
+                    f"at location {loc}."
                 )
                 return lines
             if before_name == "soup":
@@ -644,14 +644,14 @@ def naturalize_interact_held_change(
                 onions = tracker.soup_onions.get(soup_id, [])
                 onions_text = ", ".join(onions) if onions else "unknown onions"
                 lines.append(
-                    f"t={t}: agent {agent_id} interacted and placed {soup_id} ('soup') "
-                    f"on shared counter/location {loc}; {soup_id} used onions [{onions_text}]."
+                    f"t={t}: agent {agent_id} placed {soup_id} "
+                    f"at location {loc}; {soup_id} used onions [{onions_text}]."
                 )
                 return lines
 
             lines.append(
-                f"t={t}: agent {agent_id} interacted and placed {obj_brief(held_before)} "
-                f"on shared counter/location {loc}."
+                f"t={t}: agent {agent_id} placed {obj_brief(held_before)} "
+                f"at location {loc}."
             )
             return lines
 
@@ -663,12 +663,12 @@ def naturalize_interact_held_change(
             onions_text = ", ".join(onions)
             if len(onions) == 3:
                 lines.append(
-                    f"t={t}: agent {agent_id} interacted and added {onion_id} ('onion') to {soup_id}; "
+                    f"t={t}: agent {agent_id} added {onion_id} to {soup_id}; "
                     f"{soup_id} now uses onions [{onions_text}]."
                 )
             else:
                 lines.append(
-                    f"t={t}: agent {agent_id} interacted and added {onion_id} ('onion') to {soup_id}; "
+                    f"t={t}: agent {agent_id} added {onion_id} to {soup_id}; "
                     f"{soup_id} currently has onions [{onions_text}]."
                 )
         elif before_name == "dish":
@@ -676,12 +676,12 @@ def naturalize_interact_held_change(
             onions = tracker.soup_onions.get(soup_id, [])
             onions_text = ", ".join(onions) if onions else "unknown onions"
             lines.append(
-                f"t={t}: agent {agent_id} interacted and used a 'dish' to collect {soup_id} ('soup'); "
+                f"t={t}: agent {agent_id} used a dish to collect {soup_id}; "
                 f"{soup_id} used onions [{onions_text}]."
             )
         else:
             lines.append(
-                f"t={t}: agent {agent_id} interacted and used or deposited {obj_brief(held_before)}."
+                f"t={t}: agent {agent_id} used {obj_brief(held_before)}."
             )
         return lines
 
@@ -695,12 +695,12 @@ def naturalize_interact_held_change(
             onions = tracker.soup_onions.get(soup_id, [])
             onions_text = ", ".join(onions) if onions else "unknown onions"
             lines.append(
-                f"t={t}: agent {agent_id} interacted and filled a dish with {soup_id} ('soup'); "
+                f"t={t}: agent {agent_id} filled a dish with {soup_id}; "
                 f"{soup_id} used onions [{onions_text}]."
             )
         else:
             lines.append(
-                f"t={t}: agent {agent_id} interacted and changed held object from "
+                f"t={t}: agent {agent_id} changed held object from "
                 f"{obj_brief(held_before)} to {obj_brief(held_after)}."
             )
         return lines
