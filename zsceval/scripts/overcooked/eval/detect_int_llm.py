@@ -16,8 +16,9 @@ This version is intentionally lightweight but Overcooked-aware:
 3. Does not send raw joint actions, raw reward values, movement actions, object-map diffs,
    or internal object-state changes to the LLM.
 4. Tracks onion identities as onion_1, onion_2, ... and includes those IDs in event lines.
-5. Builds an onion lineage summary and a soup composition summary, listing which 3 onions
-   went into each soup whenever this can be inferred.
+5. Tracks dish identities as dish_1, dish_2, ... and includes those IDs in event lines.
+6. Builds onion and dish lineage summaries and a soup composition summary, listing which 3 onions
+   and which dish went into each soup whenever this can be inferred.
 6. Prompts the LLM with failure-case checks inspired by Biswas detect_int_proxy.py:
    - only cross-agent dependencies from interact actions,
    - goal-reaching object/resource chains,
@@ -68,10 +69,11 @@ The input contains only natural-language summaries of events caused by agents' I
 Important Overcooked context:
 - Two agents cooperate to make and deliver soups.
 - Onions are tracked with explicit IDs like onion_1, onion_2, etc.
+- Dishes are tracked with explicit IDs like dish_1, dish_2, etc.
 - Soups are tracked with explicit IDs like soup_1, soup_2, etc.
-- The input includes an onion lineage summary and a soup composition/delivery summary. Use those summaries to determine whether an onion, dish, or soup handoff was goal-reaching.
-- A soup composition line such as "soup_1 used onions [onion_1, onion_2, onion_3]" means exactly those onions were used for that soup.
-- A soup or onion is goal-reaching only if the corresponding soup is explicitly delivered within the trajectory. A filled, cooked, or completed-but-undelivered soup is NOT goal-reaching.
+- The input includes onion lineage, dish lineage, and soup composition/delivery summaries. Use those summaries to determine whether an onion, dish, or soup handoff was goal-reaching.
+- A soup composition line such as "soup_1 used onions [onion_1, onion_2, onion_3]" means exactly those onions were used for that soup. If a soup line says it used dish_2, treat dish_2 as the dish resource for that soup.
+- A soup, onion, or dish is goal-reaching only if the corresponding soup is explicitly delivered within the trajectory. A filled, cooked, or completed-but-undelivered soup is NOT goal-reaching.
 
 Definitions, following the spirit of Biswas et al.'s detector:
 - Consider only cross-agent interdependencies: an earlier INTERACT by one agent creates, moves, or modifies an object/resource/opportunity, and a later INTERACT by the other agent uses that same object/resource/opportunity.
@@ -81,7 +83,7 @@ Definitions, following the spirit of Biswas et al.'s detector:
 
 Failure-case checks to apply before counting a constructive interdependence:
 1. Looping check: count loop_int, not cons_int, if the same object/resource is passed back to the giver, cycles between agents, or the receiver appears to have already had that same object/resource before the supposed receiving action.
-2. Goal-reaching check: count irr_int, not cons_int, if the object/resource involved in the dependency never contributes to an explicitly delivered soup. For onions, the specific onion ID must appear in a soup composition whose soup ID is delivered. For soup or dish handoffs, the specific soup/dish handoff must contribute to a delivered soup.
+2. Goal-reaching check: count irr_int, not cons_int, if the object/resource involved in the dependency never contributes to an explicitly delivered soup. For onions, the specific onion ID must appear in a soup composition whose soup ID is delivered. For soup or dish handoffs, the specific soup ID or dish ID must contribute to a delivered soup.
 3. Non-constructive check: count non_cons_int for real cross-agent dependencies that are neither looping nor clearly non-goal-reaching, but are still wasted, misaligned, redundant, or do not clearly improve Overcooked task progress.
 4. Constructive check: count cons_int only when the dependency is cross-agent, uses the same onion/soup/dish/resource ID or shared opportunity, is goal-reaching, and is non-looping.
 
@@ -90,9 +92,9 @@ Be conservative:
 - Do not count two agents merely doing useful things in parallel.
 - Do not count a dependency if the later event could have happened independently without the earlier event.
 - Do not infer dependencies from movement alone; movement has been omitted intentionally.
-- Use onion IDs and soup IDs to avoid over-counting ambiguous handoffs.
+- Use onion IDs, dish IDs, and soup IDs to avoid over-counting ambiguous handoffs.
 - Do not count onions in undelivered soups as constructive, even if the soup was filled or cooked.
-- Do not invent missing dish, soup, or onion handoffs.
+- Do not invent missing dish, soup, or onion handoffs. Only count dish handoffs when a specific dish ID is shown as transferred or used across agents.
 
 Return JSON only with:
 {
@@ -311,14 +313,16 @@ def summarize_state(state: dict[str, Any]) -> dict[str, Any]:
 
 
 class OnionSoupTracker:
-    """Best-effort lineage tracker for Overcooked onions and soups.
+    """Best-effort lineage tracker for Overcooked onions, dishes, and soups.
 
-    Raw trajectories usually do not contain stable object IDs for onions. This
-    tracker assigns IDs based on interact-derived object flow:
+    Raw trajectories usually do not contain stable object IDs. This tracker assigns
+    IDs based on interact-derived object flow:
       - picking an onion from a dispenser/source creates a new onion ID;
-      - placing/picking from a shared counter transfers that ID;
+      - picking a dish from a dispenser/source creates a new dish ID;
+      - placing/picking from a shared counter transfers the existing ID;
       - adding an onion to a pot assigns it to a soup ID;
-      - a soup ID is associated with the three onion IDs that were added to it.
+      - using a dish to collect soup links that dish ID to the soup ID;
+      - delivering soup preserves the soup/dish/onion lineage.
 
     The tracker may be approximate when multiple pots are used concurrently and
     the raw state does not expose enough pot information. It avoids exposing any
@@ -327,24 +331,35 @@ class OnionSoupTracker:
 
     def __init__(self) -> None:
         self.next_onion_num = 1
+        self.next_dish_num = 1
         self.next_soup_num = 1
 
         self.agent_object_ids: dict[int, str | None] = defaultdict(lambda: None)
         self.shared_object_ids: dict[str, str] = {}
 
         self.onion_history: dict[str, list[str]] = defaultdict(list)
+        self.dish_history: dict[str, list[str]] = defaultdict(list)
         self.soup_onions: dict[str, list[str]] = defaultdict(list)
         self.soup_history: dict[str, list[str]] = defaultdict(list)
+        self.soup_dish: dict[str, str] = {}
         self.soup_location: dict[str, str] = {}
         self.soup_by_location: dict[str, str] = {}
         self.agent_soup_ids: dict[int, str | None] = defaultdict(lambda: None)
         self.completed_soups: list[str] = []
+
+    # ---------- generic ID creation ----------
 
     def new_onion(self, t: int, note: str) -> str:
         onion_id = f"onion_{self.next_onion_num}"
         self.next_onion_num += 1
         self.onion_history[onion_id].append(f"t={t}: created/tracked when {note}")
         return onion_id
+
+    def new_dish(self, t: int, note: str) -> str:
+        dish_id = f"dish_{self.next_dish_num}"
+        self.next_dish_num += 1
+        self.dish_history[dish_id].append(f"t={t}: created/tracked when {note}")
+        return dish_id
 
     def new_soup(self, location: str | None = None) -> str:
         soup_id = f"soup_{self.next_soup_num}"
@@ -353,6 +368,8 @@ class OnionSoupTracker:
             self.soup_location[soup_id] = location
             self.soup_by_location[location] = soup_id
         return soup_id
+
+    # ---------- soup helpers ----------
 
     def get_or_create_soup_for_location(self, location: str | None) -> str:
         key = location or "unknown_pot"
@@ -374,6 +391,8 @@ class OnionSoupTracker:
 
         # Fallback: create an unknown soup.
         return self.new_soup(location or "unknown_pot")
+
+    # ---------- onion flow ----------
 
     def pickup_onion_from_source(self, t: int, agent_id: int) -> str:
         onion_id = self.new_onion(t, f"agent {agent_id} picked up an onion from a dispenser/source")
@@ -420,23 +439,69 @@ class OnionSoupTracker:
 
         return onion_id, soup_id
 
-    def fill_soup(self, t: int, agent_id: int, location: str | None) -> str:
+    # ---------- dish flow ----------
+
+    def pickup_dish_from_source(self, t: int, agent_id: int) -> str:
+        dish_id = self.new_dish(t, f"agent {agent_id} picked up a dish from a dispenser/source")
+        self.agent_object_ids[agent_id] = dish_id
+        self.dish_history[dish_id].append(f"t={t}: agent {agent_id} picked it up from a dispenser/source")
+        return dish_id
+
+    def pickup_dish_from_shared(self, t: int, agent_id: int, loc: str) -> str:
+        dish_id = self.shared_object_ids.pop(loc, None)
+        if dish_id is None or not dish_id.startswith("dish_"):
+            dish_id = self.new_dish(t, f"agent {agent_id} picked up a dish from shared location {loc}")
+        self.agent_object_ids[agent_id] = dish_id
+        self.dish_history[dish_id].append(f"t={t}: agent {agent_id} picked it up from shared location {loc}")
+        return dish_id
+
+    def place_dish_on_shared(self, t: int, agent_id: int, loc: str) -> str:
+        dish_id = self.agent_object_ids.get(agent_id)
+        if dish_id is None or not dish_id.startswith("dish_"):
+            dish_id = self.new_dish(t, f"agent {agent_id} placed a dish on shared location {loc}")
+        self.shared_object_ids[loc] = dish_id
+        self.agent_object_ids[agent_id] = None
+        self.dish_history[dish_id].append(f"t={t}: agent {agent_id} placed it on shared location {loc}")
+        return dish_id
+
+    def fill_soup_with_dish(self, t: int, agent_id: int, location: str | None) -> tuple[str, str]:
+        dish_id = self.agent_object_ids.get(agent_id)
+        if dish_id is None or not dish_id.startswith("dish_"):
+            dish_id = self.new_dish(t, f"agent {agent_id} used a dish to collect soup")
+
         soup_id = self.soup_for_filling(location)
+        self.soup_dish[soup_id] = dish_id
         self.agent_soup_ids[agent_id] = soup_id
         self.agent_object_ids[agent_id] = soup_id
-        self.soup_history[soup_id].append(f"t={t}: agent {agent_id} filled a dish with {soup_id}")
+
+        self.dish_history[dish_id].append(f"t={t}: agent {agent_id} used it to collect {soup_id}")
+        self.soup_history[soup_id].append(f"t={t}: agent {agent_id} used {dish_id} to collect {soup_id}")
         if soup_id in self.completed_soups:
             self.completed_soups.remove(soup_id)
+        return dish_id, soup_id
+
+    # Backward-compatible method name used by older code paths.
+    def fill_soup(self, t: int, agent_id: int, location: str | None) -> str:
+        _, soup_id = self.fill_soup_with_dish(t, agent_id, location)
         return soup_id
+
+    # ---------- soup flow ----------
 
     def deliver_soup(self, t: int, agent_id: int) -> str:
         soup_id = self.agent_soup_ids.get(agent_id) or self.agent_object_ids.get(agent_id)
         if soup_id is None or not str(soup_id).startswith("soup_"):
             soup_id = self.soup_for_filling(None)
+        soup_id = str(soup_id)
+        dish_id = self.soup_dish.get(soup_id)
+
         self.agent_soup_ids[agent_id] = None
         self.agent_object_ids[agent_id] = None
-        self.soup_history[str(soup_id)].append(f"t={t}: agent {agent_id} delivered {soup_id}")
-        return str(soup_id)
+        if dish_id is not None:
+            self.dish_history[dish_id].append(f"t={t}: agent {agent_id} delivered {soup_id} using this dish")
+            self.soup_history[soup_id].append(f"t={t}: agent {agent_id} delivered {soup_id} using {dish_id}")
+        else:
+            self.soup_history[soup_id].append(f"t={t}: agent {agent_id} delivered {soup_id}")
+        return soup_id
 
     def pickup_soup_from_shared(self, t: int, agent_id: int, loc: str) -> str:
         soup_id = self.shared_object_ids.pop(loc, None)
@@ -444,18 +509,31 @@ class OnionSoupTracker:
             soup_id = self.soup_for_filling(None)
         self.agent_soup_ids[agent_id] = soup_id
         self.agent_object_ids[agent_id] = soup_id
-        self.soup_history[soup_id].append(f"t={t}: agent {agent_id} picked up {soup_id} from shared location {loc}")
+        dish_id = self.soup_dish.get(soup_id)
+        if dish_id is not None:
+            self.soup_history[soup_id].append(f"t={t}: agent {agent_id} picked up {soup_id} from shared location {loc} using {dish_id}")
+            self.dish_history[dish_id].append(f"t={t}: agent {agent_id} picked up {soup_id} from shared location {loc}")
+        else:
+            self.soup_history[soup_id].append(f"t={t}: agent {agent_id} picked up {soup_id} from shared location {loc}")
         return soup_id
 
     def place_soup_on_shared(self, t: int, agent_id: int, loc: str) -> str:
         soup_id = self.agent_soup_ids.get(agent_id) or self.agent_object_ids.get(agent_id)
         if soup_id is None or not str(soup_id).startswith("soup_"):
             soup_id = self.soup_for_filling(None)
-        self.shared_object_ids[loc] = str(soup_id)
+        soup_id = str(soup_id)
+        self.shared_object_ids[loc] = soup_id
         self.agent_soup_ids[agent_id] = None
         self.agent_object_ids[agent_id] = None
-        self.soup_history[str(soup_id)].append(f"t={t}: agent {agent_id} placed {soup_id} on shared location {loc}")
-        return str(soup_id)
+        dish_id = self.soup_dish.get(soup_id)
+        if dish_id is not None:
+            self.soup_history[soup_id].append(f"t={t}: agent {agent_id} placed {soup_id} on shared location {loc} using {dish_id}")
+            self.dish_history[dish_id].append(f"t={t}: agent {agent_id} placed {soup_id} on shared location {loc}")
+        else:
+            self.soup_history[soup_id].append(f"t={t}: agent {agent_id} placed {soup_id} on shared location {loc}")
+        return soup_id
+
+    # ---------- summaries ----------
 
     def onion_summary_lines(self) -> list[str]:
         lines = []
@@ -464,8 +542,20 @@ class OnionSoupTracker:
             lines.append(f"{onion_id}: {history}.")
         return lines
 
+    def dish_summary_lines(self) -> list[str]:
+        lines = []
+        for dish_id in sorted(self.dish_history, key=lambda x: int(x.split("_")[1])):
+            history = "; ".join(self.dish_history[dish_id])
+            used_for = [soup_id for soup_id, did in self.soup_dish.items() if did == dish_id]
+            if used_for:
+                lines.append(f"{dish_id}: used for soups [{', '.join(sorted(used_for, key=lambda s: int(s.split('_')[1])))}]. {history}.")
+            else:
+                lines.append(f"{dish_id}: {history}.")
+        return lines
+
     def soup_summary_lines(self) -> list[str]:
         lines = []
+
         def soup_sort_key(soup_id: str) -> int:
             try:
                 return int(soup_id.split("_")[1])
@@ -476,13 +566,15 @@ class OnionSoupTracker:
             onions = self.soup_onions[soup_id]
             onions_text = ", ".join(onions) if onions else "unknown onions"
             made_text = "made" if len(onions) >= 3 else "partially assembled"
+            dish_text = f" It used {self.soup_dish[soup_id]}." if soup_id in self.soup_dish else ""
             history = "; ".join(self.soup_history.get(soup_id, []))
-            lines.append(f"{soup_id}: {made_text} from onions [{onions_text}]. {history}.")
+            lines.append(f"{soup_id}: {made_text} from onions [{onions_text}].{dish_text} {history}.")
 
         # Include soup IDs created by filling/delivery fallback even if onion composition is unknown.
         for soup_id in sorted(set(self.soup_history) - set(self.soup_onions), key=soup_sort_key):
+            dish_text = f" It used {self.soup_dish[soup_id]}." if soup_id in self.soup_dish else ""
             history = "; ".join(self.soup_history.get(soup_id, []))
-            lines.append(f"{soup_id}: onion composition unknown. {history}.")
+            lines.append(f"{soup_id}: onion composition unknown.{dish_text} {history}.")
 
         return lines
 
@@ -557,12 +649,14 @@ def naturalize_interact_held_change(
     """Convert only an INTERACT-caused inventory change into natural language.
 
     No movement, no raw action IDs, no raw reward, no object internal states, and
-    no object-map state-change lines are emitted.
+    no object-map state-change lines are emitted. Onions, dishes, and soups are
+    assigned deterministic IDs when possible.
     """
     lines: list[str] = []
 
     before_empty = held_before is None
     after_empty = held_after is None
+    dish_names = {"dish", "plate"}
 
     if json_dumps(held_before) == json_dumps(held_after):
         # Interaction may have changed a pot/container internally, but the user
@@ -586,7 +680,23 @@ def naturalize_interact_held_change(
                 onion_id = tracker.pickup_onion_from_source(t, agent_id)
                 lines.append(
                     f"t={t}: agent {agent_id} picked up {onion_id} "
-                    f"from an onion dispenser"
+                    f"from an onion dispenser."
+                )
+            return lines
+
+        if after_name in dish_names:
+            if match is not None:
+                loc, _ = match
+                dish_id = tracker.pickup_dish_from_shared(t, agent_id, loc)
+                lines.append(
+                    f"t={t}: agent {agent_id} picked up {dish_id} "
+                    f"from location {loc}."
+                )
+            else:
+                dish_id = tracker.pickup_dish_from_source(t, agent_id)
+                lines.append(
+                    f"t={t}: agent {agent_id} picked up {dish_id} "
+                    f"from a dish dispenser."
                 )
             return lines
 
@@ -596,16 +706,21 @@ def naturalize_interact_held_change(
                 soup_id = tracker.pickup_soup_from_shared(t, agent_id, loc)
                 onions = tracker.soup_onions.get(soup_id, [])
                 onions_text = ", ".join(onions) if onions else "unknown onions"
+                dish_id = tracker.soup_dish.get(soup_id)
+                dish_text = f" using {dish_id}" if dish_id else ""
                 lines.append(
-                    f"t={t}: agent {agent_id} picked up {soup_id} "
+                    f"t={t}: agent {agent_id} picked up {soup_id}{dish_text} "
                     f"from location {loc}; {soup_id} used onions [{onions_text}]."
                 )
             else:
-                soup_id = tracker.fill_soup(t, agent_id, soup_change_location)
+                # This is usually a dish -> soup event in some encodings where the
+                # previous held object was missing. Create/use a dish ID so the soup
+                # lineage still has a concrete dish resource.
+                dish_id, soup_id = tracker.fill_soup_with_dish(t, agent_id, soup_change_location)
                 onions = tracker.soup_onions.get(soup_id, [])
                 onions_text = ", ".join(onions) if onions else "unknown onions"
                 lines.append(
-                    f"t={t}: agent {agent_id} picked up {soup_id}; "
+                    f"t={t}: agent {agent_id} used {dish_id} to pick up {soup_id}; "
                     f"{soup_id} used onions [{onions_text}]."
                 )
             return lines
@@ -619,12 +734,14 @@ def naturalize_interact_held_change(
     if not before_empty and after_empty:
         before_name = obj_name(held_before)
 
-        if delivered and before_name in {"soup", "dish"}:
+        if delivered and before_name in {"soup", "dish", "plate"}:
             soup_id = tracker.deliver_soup(t, agent_id)
             onions = tracker.soup_onions.get(soup_id, [])
             onions_text = ", ".join(onions) if onions else "unknown onions"
+            dish_id = tracker.soup_dish.get(soup_id)
+            dish_text = f" using {dish_id}" if dish_id else ""
             lines.append(
-                f"t={t}: agent {agent_id} delivered {soup_id} and achieved the goal; "
+                f"t={t}: agent {agent_id} delivered {soup_id}{dish_text} and achieved the goal; "
                 f"{soup_id} used onions [{onions_text}]."
             )
             return lines
@@ -639,12 +756,21 @@ def naturalize_interact_held_change(
                     f"at location {loc}."
                 )
                 return lines
+            if before_name in dish_names:
+                dish_id = tracker.place_dish_on_shared(t, agent_id, loc)
+                lines.append(
+                    f"t={t}: agent {agent_id} placed {dish_id} "
+                    f"at location {loc}."
+                )
+                return lines
             if before_name == "soup":
                 soup_id = tracker.place_soup_on_shared(t, agent_id, loc)
                 onions = tracker.soup_onions.get(soup_id, [])
                 onions_text = ", ".join(onions) if onions else "unknown onions"
+                dish_id = tracker.soup_dish.get(soup_id)
+                dish_text = f" using {dish_id}" if dish_id else ""
                 lines.append(
-                    f"t={t}: agent {agent_id} placed {soup_id} "
+                    f"t={t}: agent {agent_id} placed {soup_id}{dish_text} "
                     f"at location {loc}; {soup_id} used onions [{onions_text}]."
                 )
                 return lines
@@ -671,12 +797,12 @@ def naturalize_interact_held_change(
                     f"t={t}: agent {agent_id} added {onion_id} to {soup_id}; "
                     f"{soup_id} currently has onions [{onions_text}]."
                 )
-        elif before_name == "dish":
-            soup_id = tracker.fill_soup(t, agent_id, soup_change_location)
+        elif before_name in dish_names:
+            dish_id, soup_id = tracker.fill_soup_with_dish(t, agent_id, soup_change_location)
             onions = tracker.soup_onions.get(soup_id, [])
             onions_text = ", ".join(onions) if onions else "unknown onions"
             lines.append(
-                f"t={t}: agent {agent_id} used a dish to collect {soup_id}; "
+                f"t={t}: agent {agent_id} used {dish_id} to collect {soup_id}; "
                 f"{soup_id} used onions [{onions_text}]."
             )
         else:
@@ -690,12 +816,12 @@ def naturalize_interact_held_change(
         before_name = obj_name(held_before)
         after_name = obj_name(held_after)
 
-        if before_name == "dish" and after_name == "soup":
-            soup_id = tracker.fill_soup(t, agent_id, soup_change_location)
+        if before_name in dish_names and after_name == "soup":
+            dish_id, soup_id = tracker.fill_soup_with_dish(t, agent_id, soup_change_location)
             onions = tracker.soup_onions.get(soup_id, [])
             onions_text = ", ".join(onions) if onions else "unknown onions"
             lines.append(
-                f"t={t}: agent {agent_id} filled a dish with {soup_id}; "
+                f"t={t}: agent {agent_id} filled {dish_id} with {soup_id}; "
                 f"{soup_id} used onions [{onions_text}]."
             )
         else:
@@ -706,7 +832,6 @@ def naturalize_interact_held_change(
         return lines
 
     return lines
-
 
 def describe_interact_diff(
     t: int,
@@ -797,7 +922,7 @@ def get_episode_arrays(traj: dict[str, Any]) -> tuple[list[Any], list[Any], list
     return states[0], actions0, [float(x) for x in rewards[0]]
 
 
-def compress_trajectory(path: Path) -> tuple[float, list[str], list[str], list[str]]:
+def compress_trajectory(path: Path) -> tuple[float, list[str], list[str], list[str], list[str]]:
     """Convert one trajectory into local task reward and interact-only event lines."""
     with path.open("r", encoding="utf-8") as f:
         traj = json.load(f)
@@ -831,7 +956,7 @@ def compress_trajectory(path: Path) -> tuple[float, list[str], list[str], list[s
             )
         )
 
-    return task_rew, lines, tracker.onion_summary_lines(), tracker.soup_summary_lines()
+    return task_rew, lines, tracker.onion_summary_lines(), tracker.dish_summary_lines(), tracker.soup_summary_lines()
 
 
 # -----------------------------
@@ -839,20 +964,21 @@ def compress_trajectory(path: Path) -> tuple[float, list[str], list[str], list[s
 # -----------------------------
 
 
-def build_payload(path: Path, lines: list[str], onion_summary: list[str], soup_summary: list[str]) -> dict[str, Any]:
+def build_payload(path: Path, lines: list[str], onion_summary: list[str], dish_summary: list[str], soup_summary: list[str]) -> dict[str, Any]:
     return {
         "trajectory_file": str(path),
         "event_filtering": (
             "Only Overcooked INTERACT-derived agent events are listed. Movement/stay events, raw actions, "
             "numeric rewards, object internal states, and object-map state changes were removed. "
-            "Onion and soup IDs were assigned by deterministic lineage tracking."
+            "Onion, dish, and soup IDs were assigned by deterministic lineage tracking."
         ),
         "task_goal_hint": (
             "This is Overcooked. Two agents cooperate to make onion soups and deliver them. "
-            "Useful cooperation often involves one agent making a specific onion ID, dish, or soup ID available "
+            "Useful cooperation often involves one agent making a specific onion ID, dish ID, or soup ID available "
             "and the other agent using that exact resource later. Goal-reaching chains should end in an Overcooked soup delivery."
         ),
         "onion_id_summary": onion_summary,
+        "dish_id_summary": dish_summary,
         "soup_composition_summary": soup_summary,
         "natural_language_interact_events": lines,
     }
@@ -880,8 +1006,8 @@ def call_llm(client: Any, payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def classify_episode(client: Any, path: Path) -> dict[str, Any]:
-    task_rew, lines, onion_summary, soup_summary = compress_trajectory(path)
-    payload = build_payload(path, lines, onion_summary, soup_summary)
+    task_rew, lines, onion_summary, dish_summary, soup_summary = compress_trajectory(path)
+    payload = build_payload(path, lines, onion_summary, dish_summary, soup_summary)
 
     result = call_llm(client, payload)
 
@@ -890,14 +1016,15 @@ def classify_episode(client: Any, path: Path) -> dict[str, Any]:
     result["trajectory_file"] = str(path)
     result["num_lines_sent"] = len(lines)
     result["num_onions_tracked"] = len(onion_summary)
+    result["num_dishes_tracked"] = len(dish_summary)
     result["num_soups_tracked"] = len(soup_summary)
 
     return result
 
 
 def write_prompt_preview(path: Path, preview_dir: Path) -> None:
-    task_rew, lines, onion_summary, soup_summary = compress_trajectory(path)
-    payload = build_payload(path, lines, onion_summary, soup_summary)
+    task_rew, lines, onion_summary, dish_summary, soup_summary = compress_trajectory(path)
+    payload = build_payload(path, lines, onion_summary, dish_summary, soup_summary)
     payload["computed_task_rew_not_sent_for_counting"] = task_rew
 
     preview_dir.mkdir(parents=True, exist_ok=True)
@@ -950,11 +1077,12 @@ def main() -> None:
         preview_dir = Path(args.preview_dir)
         for path in tqdm(traj_paths, desc="Writing prompt previews"):
             write_prompt_preview(path, preview_dir)
-            task_rew, lines, onion_summary, soup_summary = compress_trajectory(path)
+            task_rew, lines, onion_summary, dish_summary, soup_summary = compress_trajectory(path)
             print(f"\n{path}")
             print(f"  local task_rew={task_rew}")
             print(f"  interact event lines={len(lines)}")
             print(f"  onions tracked={len(onion_summary)}")
+            print(f"  dishes tracked={len(dish_summary)}")
             print(f"  soups tracked={len(soup_summary)}")
             if onion_summary:
                 print("  Onion ID summary:")
@@ -962,6 +1090,12 @@ def main() -> None:
                     print("   ", line)
                 if len(onion_summary) > 12:
                     print(f"    ... {len(onion_summary) - 12} more onions")
+            if dish_summary:
+                print("  Dish ID summary:")
+                for line in dish_summary[:12]:
+                    print("   ", line)
+                if len(dish_summary) > 12:
+                    print(f"    ... {len(dish_summary) - 12} more dishes")
             if soup_summary:
                 print("  Soup composition summary:")
                 for line in soup_summary:
